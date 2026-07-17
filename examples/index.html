@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>tdjs — voxel sandbox</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0d111a; }
+    canvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
+
+    #overlay {
+      position: fixed; top: 12px; left: 12px;
+      font: 13px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      color: #c9d1d9; background: rgba(13,17,26,0.8);
+      padding: 10px 14px; border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.08);
+      pointer-events: none; user-select: none; z-index: 10;
+      min-width: 200px;
+    }
+    #overlay h1 { font-size: 14px; font-weight: 600; margin-bottom: 4px; color: #58a6ff; }
+    #overlay .stat { color: #8b949e; display: inline-block; width: 60px; }
+    #overlay .val { color: #e6edf3; }
+
+    #hint {
+      position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+      font: 12px/1.5 ui-monospace, monospace; color: #8b949e;
+      background: rgba(13,17,26,0.8); padding: 6px 12px; border-radius: 6px;
+      border: 1px solid rgba(255,255,255,0.06);
+      pointer-events: none; z-index: 10; text-align: center;
+    }
+
+    #hotbar {
+      position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+      display: flex; gap: 4px; z-index: 10;
+      background: rgba(13,17,26,0.8); padding: 6px; border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    .hotbar-slot {
+      width: 44px; height: 44px; border-radius: 4px;
+      background: rgba(255,255,255,0.05);
+      border: 2px solid transparent;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      position: relative;
+    }
+    .hotbar-slot.selected {
+      border-color: #58a6ff;
+      background: rgba(88,166,255,0.15);
+    }
+    .hotbar-color {
+      width: 28px; height: 28px; border-radius: 3px;
+      border: 1px solid rgba(0,0,0,0.3);
+    }
+    .hotbar-slot span {
+      position: absolute; bottom: 1px; right: 3px;
+      font: 10px ui-monospace, monospace; color: #8b949e;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="gpu"></canvas>
+  <div id="overlay">
+    <h1>tdjs voxel sandbox</h1>
+    <div><span class="stat">fps</span> <span class="val" id="fps">—</span></div>
+    <div><span class="stat">chunks</span> <span class="val" id="chunks">0</span></div>
+    <div><span class="stat">draws</span> <span class="val" id="draws">0</span></div>
+    <div><span class="stat">tris</span> <span class="val" id="tris">0</span></div>
+    <div><span class="stat">time</span> <span class="val" id="time">—</span></div>
+    <div><span class="stat">mode</span> <span class="val" id="mode">walk</span></div>
+    <div><span class="stat">gpu</span> <span class="val" id="gpu-info">—</span></div>
+  </div>
+  <div id="hint">Click to lock · WASD move · Space jump · Shift sprint · LMB break · RMB place · 1-9 hotbar · F fly · Esc release</div>
+  <div id="hotbar"></div>
+  <script type="module" src="./main.ts"></script>
+</body>
+</html>

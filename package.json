@@ -1,0 +1,32 @@
+{
+  "name": "tdjs",
+  "version": "0.1.0",
+  "description": "WebGPU-first voxel engine for infinite, detailed 3D worlds in the browser.",
+  "type": "module",
+  "main": "dist/tdjs.js",
+  "module": "dist/tdjs.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/tdjs.mjs",
+      "require": "./dist/tdjs.js"
+    }
+  },
+  "files": ["dist", "src", "README.md"],
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": ["voxel", "webgpu", "3d", "engine", "game", "infinite", "chunks"],
+  "license": "MIT",
+  "devDependencies": {
+    "@webgpu/types": "^0.1.52",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "vitest": "^2.1.5"
+  }
+}
