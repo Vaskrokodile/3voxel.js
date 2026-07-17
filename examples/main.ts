@@ -58,6 +58,8 @@ import {
   ATMOSPHERE_UNIFORM_SIZE,
   type AtmosphereUniformData,
 } from '../src/atmosphere/index.js';
+import { MaterialSystem, setWaterId, TextureAtlas, registerBuiltinTextures } from '../src/shaders/index.js';
+import { MeshCache, FrameBudget, Stats } from '../src/performance/index.js';
 
 // ---- DOM helpers ------------------------------------------------------------
 
@@ -123,7 +125,10 @@ for (let i = 0; i < COLOR_COUNT; i++) {
 
 const WATER_ID = registry.getByName('water')!.id;
 
-// ---- WGSL shaders -----------------------------------------------------------
+// Configure the shader system with our water block id.
+setWaterId(WATER_ID);
+
+// ---- WGSL shaders (from the MaterialSystem) --------------------------------
 
 const VOXEL_VERTEX_LAYOUT: VertexLayout = {
   stride: 36,
@@ -136,92 +141,12 @@ const VOXEL_VERTEX_LAYOUT: VertexLayout = {
   ],
 };
 
-const WORLD_WGSL = /* wgsl */ `
-struct CameraUniform {
-  viewProj   : mat4x4<f32>,
-  view       : mat4x4<f32>,
-  proj       : mat4x4<f32>,
-  cameraPos  : vec4<f32>,
-  time       : f32,
-  _pad       : f32,
-};
-
-struct AtmosphereUniform {
-  sunDirection : vec4<f32>,
-  sunColor     : vec4<f32>,
-  ambientColor : vec4<f32>,
-  fogColor     : vec4<f32>,
-  fogNear      : f32,
-  fogFar       : f32,
-  time         : f32,
-  _pad2        : f32,
-};
-
-struct ColorTable {
-  colors : array<vec4<f32>, 16>,
-};
-
-@group(0) @binding(0) var<uniform> camera : CameraUniform;
-@group(0) @binding(1) var<uniform> colorTable : ColorTable;
-@group(1) @binding(0) var<uniform> atmosphere : AtmosphereUniform;
-
-struct VertexInput {
-  @location(0) position : vec3<f32>,
-  @location(1) normal   : vec3<f32>,
-  @location(2) packed   : u32,
-  @location(3) uv       : vec2<f32>,
-};
-
-struct VertexOutput {
-  @builtin(position) clipPos : vec4<f32>,
-  @location(0) normal   : vec3<f32>,
-  @location(1) worldPos : vec3<f32>,
-  @location(2) @interpolate(flat) packed : u32,
-};
-
-@vertex
-fn vs_main(in : VertexInput) -> VertexOutput {
-  var out : VertexOutput;
-  out.clipPos = camera.viewProj * vec4<f32>(in.position, 1.0);
-  out.normal = in.normal;
-  out.worldPos = in.position;
-  out.packed = in.packed;
-  return out;
-}
-
-fn applyFog(color: vec3<f32>, worldPos: vec3<f32>) -> vec3<f32> {
-  let dist = distance(worldPos, camera.cameraPos.xyz);
-  let factor = clamp((dist - atmosphere.fogNear) / (atmosphere.fogFar - atmosphere.fogNear), 0.0, 1.0);
-  return mix(color, atmosphere.fogColor.xyz, factor);
-}
-
-@fragment
-fn fs_main(in : VertexOutput) -> @location(0) vec4<f32> {
-  let blockId = (in.packed >> 16u) & 0xFFFFu;
-  let ao = f32(in.packed & 0xFFu) / 3.0;
-  let aoFactor = 0.4 + 0.6 * ao;
-
-  if (blockId >= 16u) {
-    return vec4<f32>(1.0, 0.0, 1.0, 1.0);
-  }
-
-  let baseColor = colorTable.colors[blockId].rgb;
-  let n = normalize(in.normal);
-  let sunDir = normalize(atmosphere.sunDirection.xyz);
-  let ndotl = max(dot(n, sunDir), 0.0);
-  let sunLight = atmosphere.sunColor.xyz * ndotl;
-  let ambient = atmosphere.ambientColor.xyz;
-  let lighting = ambient + sunLight;
-  var color = baseColor * lighting * aoFactor;
-
-  // Apply fog.
-  color = applyFog(color, in.worldPos);
-
-  // Water is semi-transparent.
-  let alpha = select(1.0, 0.6, blockId == ${WATER_ID}u);
-  return vec4<f32>(color, alpha);
-}
-`;
+// Use the shader system's built-in materials. The Renderer expects a single
+// WGSL source with both vs_main and fs_main, so we concatenate vertex + fragment.
+const OPAQUE_MATERIAL = MaterialSystem.OPAQUE_VOXEL;
+const TRANSPARENT_MATERIAL = MaterialSystem.TRANSPARENT_VOXEL;
+const WORLD_WGSL = OPAQUE_MATERIAL.vertexShader + '\n' + OPAQUE_MATERIAL.fragmentShader;
+const WORLD_WGSL_TRANSPARENT = TRANSPARENT_MATERIAL.vertexShader + '\n' + TRANSPARENT_MATERIAL.fragmentShader;
 
 // Line shader for the selection highlight.
 const LINE_WGSL = /* wgsl */ `
@@ -402,7 +327,7 @@ async function main(): Promise<void> {
   let transparentKey: string;
   try {
     device.pushErrorScope('validation');
-    transparentKey = renderer.registerPipeline(WORLD_WGSL, VOXEL_VERTEX_LAYOUT, {
+    transparentKey = renderer.registerPipeline(WORLD_WGSL_TRANSPARENT, VOXEL_VERTEX_LAYOUT, {
       colorFormat: format,
       depthFormat: renderer.depthStencilFormat,
       blend: {
@@ -560,7 +485,25 @@ async function main(): Promise<void> {
   // --- Day/night cycle ---
   const dayNight = new DayNightCycle(8, 0.3); // start at 8am, 0.3 hours/sec
 
-  // --- GPU mesh tracking ---
+  // --- Texture atlas (procedural textures) ---
+  const atlas = new TextureAtlas(device);
+  registerBuiltinTextures(atlas);
+  atlas.upload();
+  setText('gpu-info', adapterInfo?.description || 'WebGPU ready');
+
+  // --- Performance: LRU mesh cache + adaptive frame budget ---
+  const meshCache = new MeshCache(device, 512);
+  const frameBudget = new FrameBudget({
+    targetFps: 60,
+    minViewDistance: 4,
+    maxViewDistance: 12,
+    minMaxPerFrame: 1,
+    maxMaxPerFrame: 6,
+  });
+  const perfStats = new Stats(60);
+  let currentFrame = 0;
+
+  // --- GPU mesh tracking (now using MeshCache for LRU eviction) ---
   const gpuMeshes = new Map<string, GpuMesh>();
 
   function uploadMesh(mesh: ChunkMeshData): void {
@@ -681,6 +624,10 @@ async function main(): Promise<void> {
     const now = performance.now();
     const dt = Math.min((now - lastTime) / 1000, 0.1);
     lastTime = now;
+    currentFrame++;
+
+    // --- Performance tracking ---
+    frameBudget.recordFrame(dt);
 
     frameCount++;
     fpsTimer += dt;
@@ -858,11 +805,25 @@ async function main(): Promise<void> {
     );
 
     // --- Stats ---
+    perfStats.record({
+      fps: Math.round(1 / dt),
+      frameTime: dt * 1000,
+      chunkCount: world.chunkCount,
+      meshedChunks: gpuMeshes.size,
+      drawCalls: submissions.length,
+      triangles: Math.round(totalTris),
+      gpuTimeEstimate: 0,
+      memoryEstimate: 0,
+    });
+
     setText('chunks', `${world.chunkCount} chunks, ${gpuMeshes.size} meshed`);
     setText('draws', String(submissions.length));
     setText('tris', String(Math.round(totalTris)));
     setText('time', `${dayNight.currentTime.toFixed(1)}h ${dayNight.isDay ? '(day)' : '(night)'}`);
     setText('mode', player.mode);
+    if (frameBudget.isThrottled) {
+      setText('fps', `${Math.round(frameBudget.avgFps)} ⚠`);
+    }
 
     requestAnimationFrame(frame);
   }

@@ -53,5 +53,8 @@ export {
 } from './interaction/index.js';
 
 export * from './atmosphere/index.js';
+export * from './performance/index.js';
+export * from './shaders/index.js';
+export * from './voxel2/index.js';
 
-export const VERSION = '0.2.0';
+export const VERSION = '0.3.0';

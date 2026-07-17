@@ -70,6 +70,8 @@ export class ChunkManager {
   private readonly streaming: Streaming;
   private readonly chunks = new Map<string, ChunkRecord>();
   private readonly viewDistanceWorld: number;
+  /** Reusable scratch array for distance-sorted mesh submission (no per-frame alloc). */
+  private readonly generatedScratch: ChunkRecord[] = [];
 
   constructor(opts: {
     readonly world: VoxelWorldLike;
@@ -152,12 +154,40 @@ export class ChunkManager {
       }
     }
 
-    // 4. Advance any Generated chunks that have budget (mesh submission is
-    //    cheap; the worker pool throttles actual work via `busy`).
+    // 4. Advance Generated chunks that have budget, ordered by distance to
+    //    the camera (nearest first) so the player's immediate surroundings
+    //    mesh before far-away chunks. Up to `maxPerFrame` mesh submissions are
+    //    batched per frame; the worker pool throttles actual work via `busy`.
+    this.advanceGeneratedBatch(cameraChunk);
+  }
+
+  /**
+   * Collect all chunks in the Generated state, sort them by squared distance
+   * to the camera chunk (nearest first), and submit up to `maxPerFrame` of
+   * them for meshing in one batch. Reuses a scratch array to avoid
+   * per-frame allocation of the candidate list (the sort buffer is allocated
+   * only when the candidate count grows).
+   */
+  private advanceGeneratedBatch(cameraChunk: ChunkCoord): void {
+    const scratch = this.generatedScratch;
+    scratch.length = 0;
     for (const rec of this.chunks.values()) {
-      if (rec.state === ChunkState.Generated) {
-        this.advance(rec);
-      }
+      if (rec.state === ChunkState.Generated) scratch.push(rec);
+    }
+    if (scratch.length === 0) return;
+    // Sort nearest-first by squared chunk-space distance.
+    scratch.sort((a, b) => {
+      const ax = a.coord.x - cameraChunk.x;
+      const ay = a.coord.y - cameraChunk.y;
+      const az = a.coord.z - cameraChunk.z;
+      const bx = b.coord.x - cameraChunk.x;
+      const by = b.coord.y - cameraChunk.y;
+      const bz = b.coord.z - cameraChunk.z;
+      return (ax * ax + ay * ay + az * az) - (bx * bx + by * by + bz * bz);
+    });
+    const limit = Math.min(this.streaming.maxPerFrame, scratch.length);
+    for (let i = 0; i < limit; i++) {
+      this.advance(scratch[i]!);
     }
   }
 

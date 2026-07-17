@@ -16,6 +16,12 @@ import type { BlockId, ChunkCoord } from '../core/types.js';
 export interface VoxelChunkLike {
   readonly coord: ChunkCoord;
   getBlock(lx: number, ly: number, lz: number): BlockId;
+  /**
+   * Optional fast check: true when the chunk contains only AIR. When present
+   * and true, the mesher skips meshing entirely (early exit). Implementations
+   * backed by a palette can answer this in O(1).
+   */
+  isEmpty?: () => boolean;
 }
 
 /** Block definition shape consumed by the mesher. */

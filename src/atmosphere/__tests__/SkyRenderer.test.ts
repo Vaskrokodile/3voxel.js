@@ -172,14 +172,14 @@ describe('SkyRenderer.getSubmission', () => {
     const { renderer, device } = makeRenderer();
     // The constructor already created buffers; verify via queue writes.
     // 3 vertices × 2 floats × 4 bytes = 24 bytes for vertices.
-    // 3 indices × 2 bytes = 6 bytes for indices.
+    // 3 indices × 2 bytes = 6 bytes, padded to 8 (multiple of 4 for WebGPU).
     const vertexWrite = device.queue.writes.find((w) => {
       const buf = asFakeBuffer(w.buffer);
       return buf.size === 24;
     });
     const indexWrite = device.queue.writes.find((w) => {
       const buf = asFakeBuffer(w.buffer);
-      return buf.size === 6;
+      return buf.size === 8;
     });
     expect(vertexWrite).toBeDefined();
     expect(indexWrite).toBeDefined();

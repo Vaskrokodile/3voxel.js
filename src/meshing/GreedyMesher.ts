@@ -19,7 +19,12 @@
  * 'cross' meshType blocks (plants) are NOT meshed here (TODO stub).
  *
  * Performance: mask arrays are allocated once per mesher and reused across
- * slices/axes; no per-voxel allocations.
+ * slices/axes/chunks; no per-voxel allocations. Additional optimizations:
+ *   - Early exit: a chunk reporting `isEmpty()` skips meshing entirely.
+ *   - Border-air fast path: when a chunk's face perpendicular to an axis is
+ *     entirely AIR, out-of-chunk neighbor lookups along that axis are skipped
+ *     (treated as AIR), avoiding expensive world sampler calls common for
+ *     chunks floating above terrain.
  */
 
 import { AIR, CHUNK_SIZE } from '../core/types.js';
@@ -85,8 +90,26 @@ export class GreedyMesher {
 
     const typeOf = (id: BlockId): Readonly<BlockTypeLike> => registry.get(id) ?? AIR_TYPE;
 
-    // Local-coordinate block lookup with out-of-chunk fallback to the sampler.
-    const sample = (lx: number, ly: number, lz: number): BlockId => {
+    // Early exit: if the chunk reports itself as entirely AIR (palette-backed
+    // chunks answer this in O(1)), skip meshing altogether.
+    if (chunk.isEmpty?.() === true) {
+      return this.emptyMesh(chunk.coord);
+    }
+
+    // Per-axis border-air detection. For each sweep axis d, check whether the
+    // two chunk faces perpendicular to d (local d-coord 0 and size-1) are
+    // entirely AIR. When true, no solid block touches that chunk boundary, so
+    // out-of-chunk neighbors along d can be treated as AIR without consulting
+    // the (potentially expensive) world sampler. Faces between chunks are
+    // always owned by the chunk whose border is solid, so this never drops a
+    // visible face — it only skips sampler calls that would have returned AIR
+    // (or a solid neighbor whose exposed face is the neighbor's responsibility).
+    const borderAir0 = this.axisBorderIsAir(0, chunk, size);
+    const borderAir1 = this.axisBorderIsAir(1, chunk, size);
+    const borderAir2 = this.axisBorderIsAir(2, chunk, size);
+
+    // Full world-space sampler (used when the border is NOT all air).
+    const sampleFull = (lx: number, ly: number, lz: number): BlockId => {
       if (
         lx >= 0 && lx < size &&
         ly >= 0 && ly < size &&
@@ -97,12 +120,33 @@ export class GreedyMesher {
       return sampler(ox + lx, oy + ly, oz + lz);
     };
 
+    // Fast sampler: returns AIR for any out-of-chunk coordinate (no world
+    // lookup). Used per-axis when that axis's border is all air.
+    const sampleAir = (lx: number, ly: number, lz: number): BlockId => {
+      if (
+        lx >= 0 && lx < size &&
+        ly >= 0 && ly < size &&
+        lz >= 0 && lz < size
+      ) {
+        return chunk.getBlock(lx, ly, lz);
+      }
+      return AIR;
+    };
+
     // AO occlusion test: a block occludes a vertex if it is opaque on faces.
     const occludes = (id: BlockId): boolean => typeOf(id).opaqueFaces;
 
     const builder = new MeshBuilder();
 
+    // Select the per-axis sample function once per axis (no per-slice branch).
+    const axisSamples: ReadonlyArray<(lx: number, ly: number, lz: number) => BlockId> = [
+      borderAir0 ? sampleAir : sampleFull,
+      borderAir1 ? sampleAir : sampleFull,
+      borderAir2 ? sampleAir : sampleFull,
+    ];
+
     for (let d = 0; d < 3; d++) {
+      const sample = axisSamples[d]!;
       for (let i = 0; i <= size; i++) {
         this.buildMask(d, i, size, sample, typeOf, occludes);
         // Pass 1: emit opaque owner quads; pass 2: emit transparent owner quads.
@@ -123,6 +167,48 @@ export class GreedyMesher {
       opaqueIndexCount: builder.getOpaqueIndexCount(),
       transparentIndexCount: builder.getTransparentIndexCount(),
     };
+  }
+
+  /**
+   * Build an empty (zero-vertex, zero-index) mesh result for a chunk that
+   * needs no geometry (e.g. entirely AIR).
+   */
+  private emptyMesh(coord: ChunkCoord): ChunkMeshData {
+    return {
+      chunk: coord,
+      vertices: new Uint8Array(0),
+      indices: new Uint8Array(0),
+      indexFormat: 'uint16',
+      vertexCount: 0,
+      indexCount: 0,
+      opaqueIndexCount: 0,
+      transparentIndexCount: 0,
+    };
+  }
+
+  /**
+   * Check whether both chunk faces perpendicular to axis `d` (local d-coord 0
+   * and size-1) are entirely AIR. Used to skip out-of-chunk sampler calls for
+   * that axis. O(2 * size^2) getBlock calls, done once per mesh.
+   */
+  private axisBorderIsAir(d: number, chunk: VoxelChunkLike, size: number): boolean {
+    // Face at d-coord 0 and d-coord size-1. Iterate over the in-plane axes.
+    const plane = PLANE_AXES[d]!;
+    const uAxis = plane[0]!;
+    const vAxis = plane[1]!;
+    for (let face = 0; face < 2; face++) {
+      const dCoord = face === 0 ? 0 : size - 1;
+      for (let cv = 0; cv < size; cv++) {
+        for (let cu = 0; cu < size; cu++) {
+          const xyz = unpack(d, dCoord, cu, cv);
+          if (chunk.getBlock(xyz[0], xyz[1], xyz[2]) !== AIR) return false;
+        }
+      }
+    }
+    // Suppress unused-var lint for uAxis/vAxis (kept for clarity of the plane).
+    void uAxis;
+    void vAxis;
+    return true;
   }
 
   /**
