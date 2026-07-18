@@ -142,4 +142,51 @@ describe('RigidBody', () => {
     const sp = Math.hypot(body.velocity.x, body.velocity.y, body.velocity.z);
     expect(sp).toBeLessThanOrEqual(10 + 1e-6);
   });
+
+  it('defaults mass to 1', () => {
+    const body = makeBody(5);
+    expect(body.mass).toBe(1);
+  });
+
+  it('accepts a custom mass', () => {
+    const body = new RigidBody({
+      position: { x: 0, y: 5, z: 0 },
+      halfExtents: { x: 0.3, y: 0.9, z: 0.3 },
+      mass: 70,
+    });
+    expect(body.mass).toBe(70);
+  });
+
+  it('gravity integration: velocity.y decreases by gravity*dt in free fall', () => {
+    // In the air with no floor below — use an empty world so no collision
+    // reverts the Y move. After one step, vy == gravity*dt (within epsilon).
+    const emptyWorld = new FakeWorld();
+    const collider = new VoxelCollider(emptyWorld, new FakeSolidChecker());
+    const body = new RigidBody({
+      position: { x: 0, y: 100, z: 0 },
+      halfExtents: { x: 0.3, y: 0.9, z: 0.3 },
+      gravity: -20,
+    });
+    body.step(DT, collider);
+    expect(body.velocity.y).toBeCloseTo(-20 * DT, 5);
+    expect(body.onGround).toBe(false);
+  });
+
+  it('configurable gravity changes fall acceleration', () => {
+    const emptyWorld = new FakeWorld();
+    const collider = new VoxelCollider(emptyWorld, new FakeSolidChecker());
+    const weak = new RigidBody({
+      position: { x: 0, y: 100, z: 0 },
+      halfExtents: { x: 0.3, y: 0.9, z: 0.3 },
+      gravity: -10,
+    });
+    const strong = new RigidBody({
+      position: { x: 0, y: 100, z: 0 },
+      halfExtents: { x: 0.3, y: 0.9, z: 0.3 },
+      gravity: -40,
+    });
+    weak.step(DT, collider);
+    strong.step(DT, collider);
+    expect(Math.abs(strong.velocity.y)).toBeGreaterThan(Math.abs(weak.velocity.y));
+  });
 });

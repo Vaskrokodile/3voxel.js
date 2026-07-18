@@ -124,6 +124,48 @@ class FakePool implements WorkerPoolLike {
   }
 }
 
+/**
+ * Capturing pool: records the full mesh request (including neighbor shells
+ * and block descriptors) so tests can assert the manager built them.
+ */
+class CapturingPool implements WorkerPoolLike {
+  busy = 0;
+  lastReq: {
+    chunkCoord: ChunkCoord;
+    worldOrigin: Vec3;
+    blocks: Uint8Array;
+    paletteIds: Uint8Array;
+    neighborShells?: Uint32Array;
+    blockFlags?: Uint8Array;
+    blockMeshType?: Uint8Array;
+  } | null = null;
+
+  async mesh(req: {
+    chunkCoord: ChunkCoord;
+    worldOrigin: Vec3;
+    blocks: Uint8Array;
+    paletteIds: Uint8Array;
+    neighborShells?: Uint32Array;
+    blockFlags?: Uint8Array;
+    blockMeshType?: Uint8Array;
+  }): Promise<ChunkMeshDataLike> {
+    this.lastReq = req;
+    this.busy++;
+    await Promise.resolve();
+    this.busy--;
+    return {
+      chunk: req.chunkCoord,
+      vertices: new Uint8Array(0),
+      indices: new Uint8Array(0),
+      indexFormat: 'uint16',
+      vertexCount: 0,
+      indexCount: 0,
+      opaqueIndexCount: 0,
+      transparentIndexCount: 0,
+    };
+  }
+}
+
 function makeManager(): {
   manager: ChunkManager;
   world: FakeWorld;
@@ -186,5 +228,84 @@ describe('ChunkManager', () => {
     await Promise.resolve();
     manager.update({ x: 0, y: 32, z: 0 }, 0.016);
     expect(manager.stateOf({ x: 0, y: 2, z: 0 })).toBe(ChunkState.Ready);
+  });
+
+  it('extracts neighbor border shells and block descriptors into the mesh request', async () => {
+    // World that reports a STONE block in the -x neighbor of chunk (0,2,0):
+    // chunk world origin is (0, 32, 0); -x neighbor cell at world (-1, 32, 0).
+    class NeighborWorld extends FakeWorld {
+      override getBlock(wx: number, _wy: number, _wz: number): BlockId {
+        if (wx === -1) return 1; // STONE in the -x neighbor shell
+        return AIR;
+      }
+    }
+    const world = new NeighborWorld();
+    const gen = new TerrainGenerator(1, makeRegistry());
+    const pool = new CapturingPool();
+    const serializer = new FakeSerializer();
+    const manager = new ChunkManager({
+      world,
+      gen,
+      pool,
+      serializer,
+      viewDistance: 2,
+      maxPerFrame: 4,
+      unloadMargin: 1,
+      blockDescriptorProvider: (id: BlockId) => {
+        if (id === AIR) return { solid: false, transparent: false, opaqueFaces: false, meshType: 'none' };
+        if (id === 1) return { solid: true, transparent: false, opaqueFaces: true, meshType: 'cube' };
+        return { solid: true, transparent: false, opaqueFaces: true, meshType: 'cube' };
+      },
+    });
+
+    manager.ensureReady({ x: 0, y: 2, z: 0 }, { x: 0, y: 32, z: 0 });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(pool.lastReq).not.toBeNull();
+    const req = pool.lastReq!;
+    // Neighbor shells packed: length 6 * 16 * 16, -x face at dir 0.
+    expect(req.neighborShells).toBeDefined();
+    expect(req.neighborShells!.length).toBe(6 * 16 * 16);
+    // -x neighbor shell at (ly=0, lz=0) => index 0; world.getBlock(-1,32,0) = 1.
+    expect(req.neighborShells![0]).toBe(1);
+    // A cell in the -x shell that maps to a non-(-1) world x is AIR.
+    // (ly=0, lz=0) -> world (-1, 32, 0) = STONE; all -x cells have wx=-1 => STONE.
+    // +x shell (dir 1) cells map to wx=16 => AIR.
+    expect(req.neighborShells![1 * 16 * 16]).toBe(AIR);
+
+    // Block descriptors built from the palette ([0,1,2,3,4,5,6]).
+    expect(req.blockFlags).toBeDefined();
+    expect(req.blockMeshType).toBeDefined();
+    expect(req.blockFlags!.length).toBe(7);
+    // id=1 (STONE): solid | opaqueFaces = 1 | 4 = 5.
+    expect(req.blockFlags![1]).toBe(5);
+    expect(req.blockMeshType![1]).toBe(1);
+  });
+
+  it('omits block descriptors when no provider is configured', async () => {
+    const world = new FakeWorld();
+    const gen = new TerrainGenerator(1, makeRegistry());
+    const pool = new CapturingPool();
+    const serializer = new FakeSerializer();
+    const manager = new ChunkManager({
+      world,
+      gen,
+      pool,
+      serializer,
+      viewDistance: 2,
+      maxPerFrame: 4,
+      unloadMargin: 1,
+    });
+
+    manager.ensureReady({ x: 0, y: 2, z: 0 }, { x: 0, y: 32, z: 0 });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(pool.lastReq).not.toBeNull();
+    // Neighbor shells are always sent; descriptors are not (no provider).
+    expect(pool.lastReq!.neighborShells).toBeDefined();
+    expect(pool.lastReq!.blockFlags).toBeUndefined();
+    expect(pool.lastReq!.blockMeshType).toBeUndefined();
   });
 });

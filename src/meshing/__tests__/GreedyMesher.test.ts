@@ -45,10 +45,12 @@ function makeRegistry(blocks: Record<number, Partial<BlockTypeLike>>): BlockRegi
 
 const STONE = 1;
 const WATER = 2;
+const PLANT = 3;
 
 const registry = makeRegistry({
   [STONE]: { name: 'stone', solid: true, transparent: false, opaqueFaces: true, meshType: 'cube' },
   [WATER]: { name: 'water', solid: true, transparent: true, opaqueFaces: false, meshType: 'cube' },
+  [PLANT]: { name: 'plant', solid: false, transparent: false, opaqueFaces: false, meshType: 'cross' },
 });
 
 const airSampler: NeighborSampler = () => AIR;
@@ -120,5 +122,72 @@ describe('GreedyMesher', () => {
     expect(mesh.indexCount).toBe(36);
     expect(mesh.opaqueIndexCount).toBe(36);
     expect(mesh.indexCount).toBeLessThan(72);
+  });
+
+  it('a cross block emits 8 cross vertices / 12 cross indices and no cube geometry', () => {
+    const chunk = new TestChunk({ x: 0, y: 0, z: 0 });
+    chunk.set(8, 8, 8, PLANT);
+    const mesher = new GreedyMesher(registry);
+    const mesh = mesher.mesh(chunk, { x: 0, y: 0, z: 0 }, airSampler);
+    // Two diagonal quads => 8 verts / 12 indices (4 triangles) in the cross buffer.
+    expect(mesh.crossVertexCount).toBe(8);
+    expect(mesh.crossIndexCount).toBe(12);
+    // Cross blocks are not cube-meshed, so the main buffer is empty.
+    expect(mesh.vertexCount).toBe(0);
+    expect(mesh.indexCount).toBe(0);
+    expect(mesh.opaqueIndexCount).toBe(0);
+    expect(mesh.transparentIndexCount).toBe(0);
+    expect(mesh.crossIndexFormat).toBe('uint16');
+  });
+
+  it('multiple cross blocks each emit their own 8 vertices', () => {
+    const chunk = new TestChunk({ x: 0, y: 0, z: 0 });
+    chunk.set(1, 8, 8, PLANT);
+    chunk.set(2, 8, 8, PLANT);
+    const mesher = new GreedyMesher(registry);
+    const mesh = mesher.mesh(chunk, { x: 0, y: 0, z: 0 }, airSampler);
+    expect(mesh.crossVertexCount).toBe(16);
+    expect(mesh.crossIndexCount).toBe(24);
+  });
+
+  it('culls a border face when the neighbor across the chunk boundary is solid', () => {
+    // A single stone block at the -x border (lx=0). With an AIR sampler the
+    // -x face is emitted (6 faces total => 24/36). With a sampler that returns
+    // STONE only for the matching out-of-chunk neighbor cell (lx=-1, ly=8,
+    // lz=8), the -x face is culled => 5 faces => 20 verts / 30 indices.
+    const chunk = new TestChunk({ x: 0, y: 0, z: 0 });
+    chunk.set(0, 8, 8, STONE);
+    const mesher = new GreedyMesher(registry);
+
+    const meshAir = mesher.mesh(chunk, { x: 0, y: 0, z: 0 }, airSampler);
+    expect(meshAir.indexCount).toBe(36);
+
+    const solidXSampler: NeighborSampler = (wx, wy, wz) => {
+      if (wx === -1 && wy === 8 && wz === 8) return STONE;
+      return AIR;
+    };
+    const meshCulled = mesher.mesh(chunk, { x: 0, y: 0, z: 0 }, solidXSampler);
+    expect(meshCulled.indexCount).toBe(30);
+    expect(meshCulled.vertexCount).toBe(20);
+  });
+
+  it('does not emit a face between two identical transparent blocks across the boundary', () => {
+    // Water at the +x border (lx=15). With AIR across the boundary the +x
+    // face is emitted (transparent). With WATER across the boundary (only at
+    // the matching cell) the face is culled (same transparent block).
+    const chunk = new TestChunk({ x: 0, y: 0, z: 0 });
+    chunk.set(15, 8, 8, WATER);
+    const mesher = new GreedyMesher(registry);
+
+    const meshAir = mesher.mesh(chunk, { x: 0, y: 0, z: 0 }, airSampler);
+    expect(meshAir.transparentIndexCount).toBeGreaterThan(0);
+
+    const waterXSampler: NeighborSampler = (wx, wy, wz) => {
+      if (wx === 16 && wy === 8 && wz === 8) return WATER;
+      return AIR;
+    };
+    const meshWater = mesher.mesh(chunk, { x: 0, y: 0, z: 0 }, waterXSampler);
+    // The +x face against water is culled; the other 5 faces remain.
+    expect(meshWater.transparentIndexCount).toBe(meshAir.transparentIndexCount - 6);
   });
 });

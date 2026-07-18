@@ -13,6 +13,7 @@ export {
   type CollisionResult,
 } from './VoxelCollider.js';
 export { RigidBody, type RigidBodyOptions } from './RigidBody.js';
+export { PhysicsWorld } from './PhysicsWorld.js';
 export {
   PlayerController,
   type PlayerMode,

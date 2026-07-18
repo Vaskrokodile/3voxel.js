@@ -98,6 +98,11 @@ export class WorkerPool {
   /**
    * Dispatch a mesh request to the least-busy worker. Resolves with the
    * worker's MeshResult (transferred buffers) or rejects on worker error.
+   *
+   * The request's Uint8Array/Uint32Array payloads (blocks, paletteIds,
+   * neighborShells, blockFlags, blockMeshType) are TRANSFERRED to the worker
+   * (zero-copy): their underlying ArrayBuffers are detached on the main thread
+   * after the postMessage. Callers must not reuse these arrays across requests.
    */
   mesh(req: Omit<MeshRequest, 'id'>): Promise<MeshResult> {
     const id = this.nextId++;
@@ -105,9 +110,18 @@ export class WorkerPool {
 
     const handle = this.pickLeastBusy();
 
+    // Collect transferable ArrayBuffers (typed array payloads). Structured
+    // clone would copy these; transferring detaches them on the caller side.
+    const transferables: Transferable[] = [];
+    if (fullReq.blocks) transferables.push(fullReq.blocks.buffer);
+    if (fullReq.paletteIds) transferables.push(fullReq.paletteIds.buffer);
+    if (fullReq.neighborShells) transferables.push(fullReq.neighborShells.buffer);
+    if (fullReq.blockFlags) transferables.push(fullReq.blockFlags.buffer);
+    if (fullReq.blockMeshType) transferables.push(fullReq.blockMeshType.buffer);
+
     return new Promise<MeshResult>((resolve, reject) => {
       handle.pending.set(id, { resolve, reject });
-      handle.worker.postMessage(fullReq);
+      handle.worker.postMessage(fullReq, transferables);
     });
   }
 

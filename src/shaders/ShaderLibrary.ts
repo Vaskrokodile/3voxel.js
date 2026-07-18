@@ -107,7 +107,11 @@ const APPLY_FOG: ShaderChunk = {
   name: 'apply_fog',
   source: `fn applyFog(color: vec3<f32>, worldPos: vec3<f32>) -> vec3<f32> {
   let dist = distance(worldPos, camera.cameraPos.xyz);
-  let factor = clamp((dist - atmosphere.fogNear) / (atmosphere.fogFar - atmosphere.fogNear), 0.0, 1.0);
+  let range = max(atmosphere.fogFar - atmosphere.fogNear, 0.001);
+  let distFactor = 1.0 - exp(-max(dist - atmosphere.fogNear, 0.0) / range);
+  let heightDensity = exp(-max(worldPos.y, 0.0) * 0.02);
+  let heightFactor = (1.0 - exp(-dist * 0.01)) * heightDensity;
+  let factor = clamp(max(distFactor, heightFactor * 0.5), 0.0, 1.0);
   return mix(color, atmosphere.fogColor.xyz, factor);
 }`,
   dependencies: ['camera_uniform', 'atmosphere_uniform'],
@@ -143,6 +147,63 @@ const WATER_EFFECT: ShaderChunk = {
   dependencies: ['water_id_const'],
 };
 
+const WATER_UNIFORM: ShaderChunk = {
+  name: 'water_uniform',
+  source: `struct WaterUniform {
+  waterColor    : vec4<f32>,
+  waterDepth    : f32,
+  waveAmplitude : f32,
+  time          : f32,
+  _pad          : f32,
+};`,
+};
+
+const WATER_VERTEX_OUTPUT: ShaderChunk = {
+  name: 'water_vertex_output',
+  source: `struct WaterVertexOutput {
+  @builtin(position) clipPos : vec4<f32>,
+  @location(0) normal   : vec3<f32>,
+  @location(1) worldPos : vec3<f32>,
+  @location(2) @interpolate(flat) packed : u32,
+  @location(3) uv       : vec2<f32>,
+};`,
+};
+
+const WATER_SURFACE: ShaderChunk = {
+  name: 'water_surface',
+  source: `fn waterSurfaceColor(baseColor: vec3<f32>, normal: vec3<f32>, worldPos: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+  let t = water.time;
+  let scrollUv = uv + vec2<f32>(t * 0.05, t * 0.03);
+  let shimmer = (sin(scrollUv.x * 8.0) * cos(scrollUv.y * 8.0)) * 0.5 + 0.5;
+  let viewDir = normalize(camera.cameraPos.xyz - worldPos);
+  let fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 3.0);
+  let waterCol = water.waterColor.xyz;
+  let depthFade = clamp(water.waterDepth, 0.0, 1.0);
+  let tinted = mix(baseColor, waterCol, 0.5 * depthFade);
+  let shimmerBright = shimmer * 0.15;
+  let edgeBright = fresnel * 0.5;
+  return tinted + shimmerBright + edgeBright;
+}
+fn waterSurfaceAlpha(blockId: u32, normal: vec3<f32>, worldPos: vec3<f32>) -> f32 {
+  let base = waterAlpha(blockId);
+  if (blockId != WATER_ID_U32) { return base; }
+  let viewDir = normalize(camera.cameraPos.xyz - worldPos);
+  let fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 3.0);
+  return mix(0.6, 0.9, fresnel);
+}`,
+  dependencies: ['water_uniform', 'camera_uniform', 'water_id_const', 'water_effect'],
+};
+
+const STAR_HASH: ShaderChunk = {
+  name: 'star_hash',
+  source: `fn hash33(p: vec3<f32>) -> vec3<f32> {
+  let q = vec3<f32>(dot(p, vec3<f32>(127.1, 311.7, 74.7)),
+                   dot(p, vec3<f32>(269.5, 183.3, 246.1)),
+                   dot(p, vec3<f32>(113.5, 271.9, 124.6)));
+  return fract(sin(q) * 43758.5453);
+}`,
+};
+
 /** All built-in chunks, keyed by name. */
 export const CHUNKS: Record<string, ShaderChunk> = {
   camera_uniform: CAMERA_UNIFORM,
@@ -155,6 +216,10 @@ export const CHUNKS: Record<string, ShaderChunk> = {
   sun_lighting: SUN_LIGHTING,
   unpack_block: UNPACK_BLOCK,
   water_effect: WATER_EFFECT,
+  water_uniform: WATER_UNIFORM,
+  water_vertex_output: WATER_VERTEX_OUTPUT,
+  water_surface: WATER_SURFACE,
+  star_hash: STAR_HASH,
 };
 
 // Seed the runtime registry with the built-in chunks.

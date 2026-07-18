@@ -12,11 +12,12 @@
  *       the index buffer is laid out opaque-then-transparent.
  *
  * Edge voxels use the NeighborSampler (world-space) so faces between chunks
- * are culled when the neighbor is opaque. In-worker meshing passes AIR for
- * out-of-chunk neighbors (see chunkWorker.ts) — border re-meshing is a
- * main-thread concern.
+ * are culled when the neighbor is opaque. In-worker meshing builds the sampler
+ * from transferred neighbor border shells (see chunkWorker.ts); when no shells
+ * are provided, out-of-chunk neighbors are treated as AIR.
  *
- * 'cross' meshType blocks (plants) are NOT meshed here (TODO stub).
+ * 'cross' meshType blocks (plants) are emitted as two diagonal billboard quads
+ * per voxel into a separate cross buffer (see ChunkMeshDataEx in types.ts).
  *
  * Performance: mask arrays are allocated once per mesher and reused across
  * slices/axes/chunks; no per-voxel allocations. Additional optimizations:
@@ -28,10 +29,10 @@
  */
 
 import { AIR, CHUNK_SIZE } from '../core/types.js';
-import type { BlockId, ChunkCoord, ChunkMeshData } from '../core/types.js';
+import type { BlockId, ChunkCoord } from '../core/types.js';
 import { vertexAO } from './ao.js';
 import { MeshBuilder } from './MeshBuilder.js';
-import type { BlockRegistryLike, BlockTypeLike, NeighborSampler, VoxelChunkLike } from './types.js';
+import type { BlockRegistryLike, BlockTypeLike, ChunkMeshDataEx, NeighborSampler, VoxelChunkLike } from './types.js';
 
 /** Fallback block type for AIR / unknown ids. */
 const AIR_TYPE: Readonly<BlockTypeLike> = {
@@ -81,7 +82,7 @@ export class GreedyMesher {
     this.maskAO = new Int8Array(n * 4);
   }
 
-  mesh(chunk: VoxelChunkLike, worldOrigin: Origin, sampler: NeighborSampler): ChunkMeshData {
+  mesh(chunk: VoxelChunkLike, worldOrigin: Origin, sampler: NeighborSampler): ChunkMeshDataEx {
     const registry = this.registry;
     const size = CHUNK_SIZE;
     const ox = worldOrigin.x;
@@ -137,6 +138,7 @@ export class GreedyMesher {
     const occludes = (id: BlockId): boolean => typeOf(id).opaqueFaces;
 
     const builder = new MeshBuilder();
+    const crossBuilder = new MeshBuilder();
 
     // Select the per-axis sample function once per axis (no per-slice branch).
     const axisSamples: ReadonlyArray<(lx: number, ly: number, lz: number) => BlockId> = [
@@ -155,7 +157,12 @@ export class GreedyMesher {
       }
     }
 
+    // Cross/plant blocks: emit two diagonal billboard quads per voxel into a
+    // separate buffer. Cross blocks do not participate in face culling.
+    this.emitCross(chunk, size, worldOrigin, typeOf, crossBuilder);
+
     const built = builder.build();
+    const crossBuilt = crossBuilder.build();
     const coord: ChunkCoord = chunk.coord;
     return {
       chunk: coord,
@@ -166,6 +173,11 @@ export class GreedyMesher {
       indexCount: built.indexCount,
       opaqueIndexCount: builder.getOpaqueIndexCount(),
       transparentIndexCount: builder.getTransparentIndexCount(),
+      crossVertices: crossBuilt.vertices,
+      crossIndices: crossBuilt.indices,
+      crossIndexFormat: crossBuilt.indexFormat,
+      crossVertexCount: crossBuilt.vertexCount,
+      crossIndexCount: crossBuilt.indexCount,
     };
   }
 
@@ -173,7 +185,7 @@ export class GreedyMesher {
    * Build an empty (zero-vertex, zero-index) mesh result for a chunk that
    * needs no geometry (e.g. entirely AIR).
    */
-  private emptyMesh(coord: ChunkCoord): ChunkMeshData {
+  private emptyMesh(coord: ChunkCoord): ChunkMeshDataEx {
     return {
       chunk: coord,
       vertices: new Uint8Array(0),
@@ -183,6 +195,11 @@ export class GreedyMesher {
       indexCount: 0,
       opaqueIndexCount: 0,
       transparentIndexCount: 0,
+      crossVertices: new Uint8Array(0),
+      crossIndices: new Uint8Array(0),
+      crossIndexFormat: 'uint16',
+      crossVertexCount: 0,
+      crossIndexCount: 0,
     };
   }
 
@@ -403,6 +420,83 @@ export class GreedyMesher {
         cu += w;
       }
     }
+  }
+
+  /**
+   * Emit cross-shaped billboard geometry for every 'cross' meshType block in
+   * the chunk. Each voxel produces two diagonal quads (an X) standing upright
+   * (full voxel height), double-sided, with per-quad UVs in [0,1]. Cross
+   * blocks are not face-culled against neighbors.
+   */
+  private emitCross(
+    chunk: VoxelChunkLike,
+    size: number,
+    worldOrigin: Origin,
+    typeOf: (id: BlockId) => Readonly<BlockTypeLike>,
+    builder: MeshBuilder,
+  ): void {
+    const ox = worldOrigin.x;
+    const oy = worldOrigin.y;
+    const oz = worldOrigin.z;
+    for (let ly = 0; ly < size; ly++) {
+      for (let lz = 0; lz < size; lz++) {
+        for (let lx = 0; lx < size; lx++) {
+          const id = chunk.getBlock(lx, ly, lz);
+          if (id === AIR) continue;
+          const type = typeOf(id);
+          if (type.meshType !== 'cross') continue;
+          this.emitCrossQuads(ox + lx, oy + ly, oz + lz, id, builder);
+        }
+      }
+    }
+  }
+
+  /**
+   * Emit the two diagonal quads for one cross block at world origin (wx,wy,wz).
+   * Quad A spans the (-x,-z)->(+x,+z) diagonal; Quad B the (-x,+z)->(+x,-z)
+   * diagonal. Both span the full voxel height (y..y+1).
+   */
+  private emitCrossQuads(
+    wx: number,
+    wy: number,
+    wz: number,
+    blockId: BlockId,
+    builder: MeshBuilder,
+  ): void {
+    // Quad A: corners (0,0,0),(1,0,1),(1,1,1),(0,1,0).
+    const aBL: readonly [number, number, number] = [wx, wy, wz];
+    const aBR: readonly [number, number, number] = [wx + 1, wy, wz + 1];
+    const aTR: readonly [number, number, number] = [wx + 1, wy + 1, wz + 1];
+    const aTL: readonly [number, number, number] = [wx, wy + 1, wz];
+    const aNormal: readonly [number, number, number] = [-0.70710678, 0, 0.70710678];
+    // Quad B: corners (0,0,1),(1,0,0),(1,1,0),(0,1,1).
+    const bBL: readonly [number, number, number] = [wx, wy, wz + 1];
+    const bBR: readonly [number, number, number] = [wx + 1, wy, wz];
+    const bTR: readonly [number, number, number] = [wx + 1, wy + 1, wz];
+    const bTL: readonly [number, number, number] = [wx, wy + 1, wz + 1];
+    const bNormal: readonly [number, number, number] = [0.70710678, 0, 0.70710678];
+
+    const uvBL: readonly [number, number] = [0, 0];
+    const uvBR: readonly [number, number] = [1, 0];
+    const uvTR: readonly [number, number] = [1, 1];
+    const uvTL: readonly [number, number] = [0, 1];
+    const ao = 3; // cross plants are not AO-shaded
+
+    // Quad A
+    const a0 = builder.addVertex(aBL, aNormal, ao, blockId, uvBL);
+    const a1 = builder.addVertex(aBR, aNormal, ao, blockId, uvBR);
+    const a2 = builder.addVertex(aTR, aNormal, ao, blockId, uvTR);
+    const a3 = builder.addVertex(aTL, aNormal, ao, blockId, uvTL);
+    builder.addTriangle(a0, a1, a2, false);
+    builder.addTriangle(a0, a2, a3, false);
+
+    // Quad B
+    const b0 = builder.addVertex(bBL, bNormal, ao, blockId, uvBL);
+    const b1 = builder.addVertex(bBR, bNormal, ao, blockId, uvBR);
+    const b2 = builder.addVertex(bTR, bNormal, ao, blockId, uvTR);
+    const b3 = builder.addVertex(bTL, bNormal, ao, blockId, uvTL);
+    builder.addTriangle(b0, b1, b2, false);
+    builder.addTriangle(b0, b2, b3, false);
   }
 
   private emitQuad(

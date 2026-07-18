@@ -17,6 +17,9 @@ export interface RigidBodyOptions {
   friction?: number;
   /** Maximum speed magnitude in blocks/s. Default 50. */
   maxSpeed?: number;
+  /** Mass in arbitrary units (unused by default forces, exposed for future
+   * impulse/momentum extensions). Default 1. */
+  mass?: number;
 }
 
 /**
@@ -44,6 +47,8 @@ export class RigidBody {
   readonly halfExtents: Vec3;
   /** True when the body is resting on a solid surface this step. */
   onGround: boolean;
+  /** Mass in arbitrary units (default 1). */
+  readonly mass: number;
 
   private readonly gravity: number;
   private readonly friction: number;
@@ -61,6 +66,7 @@ export class RigidBody {
     this.gravity = opts.gravity ?? -28;
     this.friction = opts.friction ?? 0.85;
     this.maxSpeed = opts.maxSpeed ?? 50;
+    this.mass = opts.mass ?? 1;
     this.onGround = false;
     this.halfW = opts.halfExtents.x * 2;
     this.halfH = opts.halfExtents.y * 2;

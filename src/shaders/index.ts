@@ -49,3 +49,19 @@ export {
   LEAVES_GENERATOR,
   SNOW_GENERATOR,
 } from './TextureAtlas.js';
+
+export {
+  type WaterUniformData,
+  WaterUniformWriter,
+  WATER_UNIFORM_SIZE,
+  WATER_COLOR_OFFSET,
+  WATER_DEPTH_OFFSET,
+  WAVE_AMPLITUDE_OFFSET,
+  WATER_TIME_OFFSET,
+  DEFAULT_WATER_COLOR,
+  DEFAULT_WATER_DEPTH,
+  DEFAULT_WAVE_AMPLITUDE,
+  defaultWaterUniformData,
+} from './WaterUniform.js';
+
+export { type PostProcessPass } from './PostProcess.js';

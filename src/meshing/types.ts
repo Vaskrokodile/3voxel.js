@@ -7,7 +7,7 @@
  * are structurally compatible.
  */
 
-import type { BlockId, ChunkCoord } from '../core/types.js';
+import type { BlockId, ChunkCoord, ChunkMeshData } from '../core/types.js';
 
 /**
  * Minimal read-only view of a voxel chunk the mesher needs.
@@ -34,13 +34,62 @@ export interface BlockTypeLike {
   readonly transparent: boolean;
   /** If true, this block fully occludes adjacent faces (no face drawn against it). */
   readonly opaqueFaces: boolean;
-  /** Geometry class. Only 'cube' is meshed here; 'cross' is a future stub. */
+  /** Geometry class. 'cube' is greedy-meshed; 'cross' emits billboard quads; 'none' is not meshed. */
   readonly meshType: 'cube' | 'cross' | 'none';
 }
 
 /** Registry mapping BlockId -> BlockTypeLike. */
 export interface BlockRegistryLike {
   get(id: BlockId): BlockTypeLike | undefined;
+}
+
+/**
+ * Compact per-block descriptor carried through the worker protocol so the
+ * off-main-thread mesher can classify blocks (solid / transparent / opaque /
+ * cross) without importing the real registry. Packed into typed arrays in the
+ * MeshRequest (see threading/messages.ts).
+ */
+export interface BlockDescriptor {
+  readonly solid: boolean;
+  readonly transparent: boolean;
+  readonly opaqueFaces: boolean;
+  readonly meshType: 'none' | 'cube' | 'cross';
+}
+
+/**
+ * Extended chunk mesh data. Adds a separate buffer for 'cross' meshType
+ * blocks (plants/vegetation): two diagonal billboard quads per voxel, rendered
+ * double-sided with alpha-tested textures.
+ *
+ * Opaque and transparent 'cube' geometry remains in the inherited
+ * `vertices`/`indices` buffer, split by `opaqueIndexCount` /
+ * `transparentIndexCount` (indices laid out opaque-first, then transparent) so
+ * the renderer can draw the transparent index range with a blended material.
+ *
+ * Cross geometry lives in its own buffer (`crossVertices`/`crossIndices`) so it
+ * can be drawn with a dedicated alpha-tested, double-sided material.
+ *
+ * SHADER / RENDERER CONTRACT (cross buffer):
+ *   - Vertex layout is identical to the cube buffer (see VertexLayout.ts):
+ *     position(float32x3), normal(float32x3), ao(uint8), blockId(uint16),
+ *     uv(float32x2). The renderer should use the same vertex buffer layout.
+ *   - The material drawing the cross buffer MUST disable back-face culling
+ *     (cullMode: 'none') because the billboards are viewed from both sides.
+ *   - The material MUST apply alpha testing (discard fragments with
+ *     texture alpha < a threshold, e.g. 0.5) so the quad outline is masked
+ *     out by the plant texture's alpha channel. No blending is required.
+ *   - `blockId` indexes the same per-block texture array as cube geometry;
+ *     the renderer should look up the plant texture by the cross block's id.
+ *   - UVs are in [0,1] per quad (one full texture tile per diagonal quad).
+ */
+export interface ChunkMeshDataEx extends ChunkMeshData {
+  /** Cross/plant billboard vertex bytes (same layout as `vertices`). */
+  readonly crossVertices: Uint8Array;
+  /** Cross/plant billboard index bytes (uint16 or uint32). */
+  readonly crossIndices: Uint8Array;
+  readonly crossIndexFormat: 'uint16' | 'uint32';
+  readonly crossVertexCount: number;
+  readonly crossIndexCount: number;
 }
 
 /**

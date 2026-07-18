@@ -148,4 +148,60 @@ describe('PlayerController', () => {
     expect(body.position.y).toBeLessThan(20);
     expect(body.velocity.y).toBeLessThan(0);
   });
+
+  it('walk mode: air control is reduced vs ground control', () => {
+    // Two players: one on the ground, one in the air, both given forward input
+    // for a single step. The grounded player should reach a higher horizontal
+    // speed because air control multiplies acceleration by 0.3.
+    const ground = makePlayer(1.0);
+    const air = makePlayer(1.0);
+    ground.player.yaw = 0;
+    air.player.yaw = 0;
+    ground.player.mode = 'walk';
+    air.player.mode = 'walk';
+    // Settle the ground player so onGround is true.
+    for (let i = 0; i < 5; i++) ground.player.update(DT, input({}), ground.collider);
+    expect(ground.body.onGround).toBe(true);
+    // Force the air player off the ground with an upward impulse and confirm
+    // it is airborne before applying horizontal input.
+    air.body.applyImpulse({ x: 0, y: 20, z: 0 });
+    air.player.update(DT, input({}), air.collider);
+    expect(air.body.onGround).toBe(false);
+    // Now apply one step of forward input to each.
+    ground.player.update(DT, input({ forward: 1 }), ground.collider);
+    air.player.update(DT, input({ forward: 1 }), air.collider);
+    const groundSpeed = Math.hypot(ground.body.velocity.x, ground.body.velocity.z);
+    const airSpeed = Math.hypot(air.body.velocity.x, air.body.velocity.z);
+    expect(groundSpeed).toBeGreaterThan(airSpeed);
+  });
+
+  it('walk mode: custom airControl of 1 matches ground control', () => {
+    const world = new FakeWorld();
+    world.fillFloor(-8, 8, -8, 8);
+    const collider = new VoxelCollider(world, new FakeSolidChecker());
+    const body = new RigidBody({
+      position: { x: 0, y: 1.0, z: 0 },
+      halfExtents: { x: 0.3, y: 0.9, z: 0.3 },
+    });
+    const player = new PlayerController({
+      body,
+      eyeHeight: 1.6,
+      walkSpeed: 4.3,
+      sprintSpeed: 5.6,
+      jumpVelocity: 8.4,
+      flySpeed: 11,
+      airControl: 1,
+    });
+    player.yaw = 0;
+    player.mode = 'walk';
+    // Settle, then jump so we are airborne.
+    for (let i = 0; i < 5; i++) player.update(DT, input({}), collider);
+    player.update(DT, input({ jump: true }), collider);
+    expect(body.onGround).toBe(false);
+    // With airControl=1, the air acceleration equals ground acceleration.
+    const v0 = Math.hypot(body.velocity.x, body.velocity.z);
+    player.update(DT, input({ forward: 1 }), collider);
+    const v1 = Math.hypot(body.velocity.x, body.velocity.z);
+    expect(v1).toBeGreaterThan(v0);
+  });
 });

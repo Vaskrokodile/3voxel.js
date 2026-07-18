@@ -9,14 +9,15 @@
  * world through {@link VoxelWorldLike} and serializes chunks for the mesh
  * worker through an injected {@link ChunkSerializer}.
  *
- * FUTURE WORK (not faked here):
- *   - Cross-chunk neighbor meshing (seam stitching). The current mesher is
- *     assumed to handle borders via the world's getBlock or a neighbor
- *     snapshot; this manager only ships single-chunk data.
- *   - Merged-LOD meshes (see LOD.ts).
+ * Cross-chunk neighbor meshing (seam stitching): when submitting a chunk for
+ * meshing the manager extracts the 1-voxel border shells of the chunk's 6
+ * neighbors from the voxel world and ships them in the MeshRequest. The worker
+ * uses them to cull faces between two solid chunks across chunk boundaries.
+ * Neighbors that are not yet loaded read as AIR, so edge faces are emitted
+ * until the neighbor loads and the chunk is re-meshed (see requestRemesh).
  */
-import type { ChunkCoord, Logger, Vec3 } from '../core/types.js';
-import { chunkKey } from '../core/types.js';
+import type { BlockId, ChunkCoord, Logger, Vec3 } from '../core/types.js';
+import { CHUNK_SIZE, chunkKey } from '../core/types.js';
 import type {
   ChunkMeshDataLike,
   ChunkSerializer,
@@ -27,6 +28,58 @@ import type {
 import type { TerrainGenerator } from '../generation/TerrainGenerator.js';
 import { Streaming } from './Streaming.js';
 import { lodTierFor, LODTier } from './LOD.js';
+
+/**
+ * Per-block descriptor the manager can provide so the mesh worker classifies
+ * blocks (solid / transparent / opaque / cross) without importing the real
+ * registry. Structurally compatible with meshing.BlockDescriptor.
+ */
+export interface BlockDescriptorEntry {
+  readonly solid: boolean;
+  readonly transparent: boolean;
+  readonly opaqueFaces: boolean;
+  readonly meshType: 'none' | 'cube' | 'cross';
+}
+
+/** Provider mapping a BlockId to its descriptor. */
+export type BlockDescriptorProvider = (id: BlockId) => BlockDescriptorEntry | undefined;
+
+/**
+ * Worker pool surface used by the manager. Extends {@link WorkerPoolLike} with
+ * optional neighbor-shell and block-descriptor payloads on the mesh request so
+ * the worker can perform cross-chunk face culling and transparent/cross
+ * classification. The extra fields are optional, so any WorkerPoolLike whose
+ * mesh accepts the base fields is structurally assignable (method bivariance).
+ */
+export interface MeshWorkerPool extends WorkerPoolLike {
+  mesh(req: {
+    readonly chunkCoord: ChunkCoord;
+    readonly worldOrigin: Vec3;
+    readonly blocks: Uint8Array;
+    readonly paletteIds: Uint8Array;
+    readonly neighborShells?: Uint32Array | undefined;
+    readonly blockFlags?: Uint8Array | undefined;
+    readonly blockMeshType?: Uint8Array | undefined;
+  }): Promise<ChunkMeshDataLike>;
+}
+
+/** Number of entries per neighbor face shell (CHUNK_SIZE * CHUNK_SIZE). */
+const SHELL_FACE = CHUNK_SIZE * CHUNK_SIZE;
+/** Direction indices into the packed neighborShells array. */
+const DIR_NX = 0;
+const DIR_PX = 1;
+const DIR_NY = 2;
+const DIR_PY = 3;
+const DIR_NZ = 4;
+const DIR_PZ = 5;
+/** blockFlags bitfield: bit 0 = solid, bit 1 = transparent, bit 2 = opaqueFaces. */
+const FLAG_SOLID = 1;
+const FLAG_TRANSPARENT = 2;
+const FLAG_OPAQUE_FACES = 4;
+/** blockMeshType codes: 0 = none, 1 = cube, 2 = cross. */
+const MESH_NONE = 0;
+const MESH_CUBE = 1;
+const MESH_CROSS = 2;
 
 /** Lifecycle state of a managed chunk. */
 export enum ChunkState {
@@ -64,8 +117,9 @@ const DEFAULT_UNLOAD_MARGIN = 2;
 export class ChunkManager {
   private readonly world: VoxelWorldLike;
   private readonly gen: TerrainGenerator;
-  private readonly pool: WorkerPoolLike;
+  private readonly pool: MeshWorkerPool;
   private readonly serializer: ChunkSerializer;
+  private readonly descriptorProvider: BlockDescriptorProvider | undefined;
   private readonly logger: Logger | undefined;
   private readonly streaming: Streaming;
   private readonly chunks = new Map<string, ChunkRecord>();
@@ -76,8 +130,10 @@ export class ChunkManager {
   constructor(opts: {
     readonly world: VoxelWorldLike;
     readonly gen: TerrainGenerator;
-    readonly pool: WorkerPoolLike;
+    readonly pool: MeshWorkerPool;
     readonly serializer: ChunkSerializer;
+    /** Optional per-block descriptor provider for worker-side transparent/cross classification. */
+    readonly blockDescriptorProvider?: BlockDescriptorProvider;
     readonly logger?: Logger;
     readonly viewDistance?: number;
     readonly maxPerFrame?: number;
@@ -87,6 +143,7 @@ export class ChunkManager {
     this.gen = opts.gen;
     this.pool = opts.pool;
     this.serializer = opts.serializer;
+    this.descriptorProvider = opts.blockDescriptorProvider;
     this.logger = opts.logger;
     const vd = opts.viewDistance ?? DEFAULT_VIEW_DISTANCE;
     this.streaming = new Streaming({
@@ -250,12 +307,22 @@ export class ChunkManager {
         const chunk: VoxelChunkLike = this.world.ensureChunk(rec.coord);
         const { blocks, paletteIds } = this.serializer.serialize(chunk);
         const worldOrigin = {
-          x: rec.coord.x * 16,
-          y: rec.coord.y * 16,
-          z: rec.coord.z * 16,
+          x: rec.coord.x * CHUNK_SIZE,
+          y: rec.coord.y * CHUNK_SIZE,
+          z: rec.coord.z * CHUNK_SIZE,
         };
+        const neighborShells = this.buildNeighborShells(worldOrigin);
+        const descriptors = this.buildBlockDescriptors(paletteIds);
         rec.promise = this.pool
-          .mesh({ chunkCoord: rec.coord, worldOrigin, blocks, paletteIds })
+          .mesh({
+            chunkCoord: rec.coord,
+            worldOrigin,
+            blocks,
+            paletteIds,
+            neighborShells,
+            blockFlags: descriptors?.flags,
+            blockMeshType: descriptors?.meshTypes,
+          })
           .then((mesh) => {
             rec.mesh = mesh;
             rec.state = ChunkState.Ready;
@@ -324,6 +391,83 @@ export class ChunkManager {
     for (let i = 0; i < toDelete.length; i++) {
       this.chunks.delete(toDelete[i]!);
     }
+  }
+
+  /**
+   * Extract the 1-voxel border shells of the 6 neighbor chunks touching the
+   * chunk at `worldOrigin`. Each face is CHUNK_SIZE*CHUNK_SIZE BlockIds read
+   * from the voxel world (unloaded neighbors read as AIR). Packed into a
+   * single Uint32Array of length 6*SHELL_FACE, ordered
+   * [-x, +x, -y, +y, -z, +z]; within each face, indexed by
+   * (inPlaneA * CHUNK_SIZE + inPlaneB) where the in-plane axes are the two
+   * axes other than the face normal (see threading/messages.ts).
+   */
+  private buildNeighborShells(worldOrigin: Vec3): Uint32Array {
+    const world = this.world;
+    const ox = worldOrigin.x;
+    const oy = worldOrigin.y;
+    const oz = worldOrigin.z;
+    const S = CHUNK_SIZE;
+    const shells = new Uint32Array(6 * SHELL_FACE);
+    // x faces: in-plane axes y, z.
+    for (let y = 0; y < S; y++) {
+      for (let z = 0; z < S; z++) {
+        shells[DIR_NX * SHELL_FACE + y * S + z] = world.getBlock(ox - 1, oy + y, oz + z);
+        shells[DIR_PX * SHELL_FACE + y * S + z] = world.getBlock(ox + S, oy + y, oz + z);
+      }
+    }
+    // y faces: in-plane axes x, z.
+    for (let x = 0; x < S; x++) {
+      for (let z = 0; z < S; z++) {
+        shells[DIR_NY * SHELL_FACE + x * S + z] = world.getBlock(ox + x, oy - 1, oz + z);
+        shells[DIR_PY * SHELL_FACE + x * S + z] = world.getBlock(ox + x, oy + S, oz + z);
+      }
+    }
+    // z faces: in-plane axes x, y.
+    for (let x = 0; x < S; x++) {
+      for (let y = 0; y < S; y++) {
+        shells[DIR_NZ * SHELL_FACE + x * S + y] = world.getBlock(ox + x, oy + y, oz - 1);
+        shells[DIR_PZ * SHELL_FACE + x * S + y] = world.getBlock(ox + x, oy + y, oz + S);
+      }
+    }
+    return shells;
+  }
+
+  /**
+   * Build per-palette block descriptor arrays (blockFlags bitfield +
+   * blockMeshType code) from the descriptor provider. Returns undefined when
+   * no provider is configured (the worker then falls back to its default
+   * opaque-cube registry).
+   */
+  private buildBlockDescriptors(
+    paletteIds: Uint8Array,
+  ): { flags: Uint8Array; meshTypes: Uint8Array } | undefined {
+    const provider = this.descriptorProvider;
+    if (provider === undefined) return undefined;
+    const n = paletteIds.length;
+    const flags = new Uint8Array(n);
+    const meshTypes = new Uint8Array(n);
+    for (let i = 0; i < n; i++) {
+      const id = paletteIds[i] ?? 0;
+      const d = provider(id);
+      if (d === undefined) {
+        // Unknown block: default to opaque cube (worker fallback).
+        flags[i] = FLAG_SOLID | FLAG_OPAQUE_FACES;
+        meshTypes[i] = MESH_CUBE;
+        continue;
+      }
+      let f = 0;
+      if (d.solid) f |= FLAG_SOLID;
+      if (d.transparent) f |= FLAG_TRANSPARENT;
+      if (d.opaqueFaces) f |= FLAG_OPAQUE_FACES;
+      flags[i] = f;
+      let mt = MESH_CUBE;
+      if (d.meshType === 'none') mt = MESH_NONE;
+      else if (d.meshType === 'cross') mt = MESH_CROSS;
+      else if (d.meshType === 'cube') mt = MESH_CUBE;
+      meshTypes[i] = mt;
+    }
+    return { flags, meshTypes };
   }
 
   private log(level: 'debug' | 'info' | 'warn' | 'error', msg: string, ctx?: Record<string, unknown>): void {

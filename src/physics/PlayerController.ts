@@ -19,6 +19,17 @@ export interface PlayerOptions {
   jumpVelocity: number;
   /** Fly speed in blocks/s. */
   flySpeed: number;
+  /**
+   * Ground acceleration in blocks/s². The horizontal velocity is eased
+   * toward the input target at this rate. Default 50 (near-instant).
+   */
+  acceleration?: number;
+  /**
+   * Air-control multiplier applied to {@link PlayerOptions.acceleration}
+   * when the body is airborne (0.3 = 30% of ground acceleration).
+   * Default 0.3.
+   */
+  airControl?: number;
 }
 
 /**
@@ -66,6 +77,8 @@ export class PlayerController {
   private readonly sprintSpeed: number;
   private readonly jumpVelocity: number;
   private readonly flySpeed: number;
+  private readonly acceleration: number;
+  private readonly airControl: number;
   /** Cached eye position to avoid per-frame allocation. */
   private readonly eye: Vec3;
 
@@ -76,6 +89,8 @@ export class PlayerController {
     this.sprintSpeed = opts.sprintSpeed;
     this.jumpVelocity = opts.jumpVelocity;
     this.flySpeed = opts.flySpeed;
+    this.acceleration = opts.acceleration ?? 50;
+    this.airControl = opts.airControl ?? 0.3;
     this.mode = 'walk';
     this.yaw = 0;
     this.eye = { x: 0, y: 0, z: 0 };
@@ -106,11 +121,14 @@ export class PlayerController {
     const { dx, dz } = this.moveDir(input.forward, input.right);
     const speed = input.sprint ? this.sprintSpeed : this.walkSpeed;
     const len = Math.hypot(dx, dz);
-    if (len > 1e-6) {
-      this.body.setHorizontalVelocity((dx / len) * speed, (dz / len) * speed);
-    } else {
-      this.body.setHorizontalVelocity(0, 0);
-    }
+    const targetVx = len > 1e-6 ? (dx / len) * speed : 0;
+    const targetVz = len > 1e-6 ? (dz / len) * speed : 0;
+    // Reduced acceleration when airborne (air control).
+    const accel = this.body.onGround ? this.acceleration : this.acceleration * this.airControl;
+    const t = 1 - Math.exp(-accel * dt);
+    const v = this.body.velocity;
+    v.x += (targetVx - v.x) * t;
+    v.z += (targetVz - v.z) * t;
     if (input.jump && this.body.onGround) {
       this.body.applyImpulse({ x: 0, y: this.jumpVelocity, z: 0 });
     }
