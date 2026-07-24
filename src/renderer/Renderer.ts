@@ -180,6 +180,15 @@ export class Renderer {
   }
 
   /**
+   * A view of the current swapchain texture. Call once per frame, immediately
+   * before rendering into it (the texture is re-acquired each frame). Useful
+   * as the final destination of a post-process chain.
+   */
+  public get currentSwapchainView(): GPUTextureView {
+    return this.device.context.getCurrentTexture().createView();
+  }
+
+  /**
    * Render one frame: write the camera uniform, begin a render pass, record
    * `submissions`, and submit.
    *
@@ -219,6 +228,49 @@ export class Renderer {
             clearColor: CLEAR_COLOR,
             clear,
           };
+
+    this.recorder.beginFrame(attachments);
+    this.recorder.draw(submissions);
+    this.recorder.endFrame();
+  }
+
+  /**
+   * Render one frame into a provided color view (e.g. an offscreen HDR target
+   * for post-processing) instead of the swapchain.
+   *
+   * Requires `sampleCount === 1` (no MSAA) — the offscreen target must be a
+   * non-multisampled texture view. The renderer's depth texture is reused as
+   * the depth attachment, so `colorView` must match the renderer's pixel size
+   * (call {@link Renderer.resize} first).
+   *
+   * @param colorView         Target color view (sampleCount 1).
+   * @param cameraUniformData Per-frame camera data.
+   * @param submissions       Draw calls to record this frame.
+   * @param clear             Whether to clear the targets (default true).
+   */
+  public renderToColorView(
+    colorView: GPUTextureView,
+    cameraUniformData: CameraUniformData,
+    submissions: readonly DrawSubmission[],
+    clear = true,
+  ): void {
+    if (this.depthTexture === null) {
+      throw new RendererError('renderToColorView() called before resize().');
+    }
+    if (this.sampleCount !== 1) {
+      throw new RendererError('renderToColorView() requires sampleCount === 1.');
+    }
+    this.cameraUniform.write(this.cameraBuffer, this.queue, cameraUniformData);
+
+    const depthView = this.depthTexture.createView();
+    const attachments: FrameAttachments = {
+      colorView,
+      depthView,
+      sampleCount: 1,
+      depthFormat: this.depthFormat,
+      clearColor: CLEAR_COLOR,
+      clear,
+    };
 
     this.recorder.beginFrame(attachments);
     this.recorder.draw(submissions);

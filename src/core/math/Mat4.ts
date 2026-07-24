@@ -105,6 +105,43 @@ export function mat4Perspective(
 }
 
 /**
+ * WebGPU orthographic projection. NDC z maps to [0, 1] (NOT OpenGL [-1, 1]).
+ * `left`/`right`/`bottom`/`top`/`near`/`far` define the view-volume box.
+ * Used for directional shadow cameras and UI.
+ */
+export function mat4Ortho(
+  out: Mat4,
+  left: number,
+  right: number,
+  bottom: number,
+  top: number,
+  near: number,
+  far: number,
+): Mat4 {
+  const m = out.m;
+  m.fill(0);
+  const rl = right - left;
+  const tb = top - bottom;
+  const nf = near - far;
+  if (rl === 0 || tb === 0 || nf === 0) {
+    // Degenerate; leave identity-ish to avoid NaNs.
+    m[0] = 1;
+    m[5] = 1;
+    m[10] = 1;
+    m[15] = 1;
+    return out;
+  }
+  m[0] = 2 / rl;
+  m[5] = 2 / tb;
+  m[10] = 1 / nf; // 1/(near-far); maps eye-space -z to NDC z in [0,1]
+  m[12] = -(right + left) / rl;
+  m[13] = -(top + bottom) / tb;
+  m[14] = near / nf; // near/(near-far)
+  m[15] = 1;
+  return out;
+}
+
+/**
  * Right-handed look-at matrix (camera looking from `eye` to `target`, `up`).
  * Forward is `target - eye`; the camera's -Z axis points along forward.
  */

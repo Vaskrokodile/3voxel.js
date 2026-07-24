@@ -64,4 +64,15 @@ export {
   defaultWaterUniformData,
 } from './WaterUniform.js';
 
-export { type PostProcessPass } from './PostProcess.js';
+export { type PostProcessPass, type PostProcessOptions, PostProcessChain } from './PostProcess.js';
+
+export {
+  type BlockFaceTextures,
+  BlockTextureTable,
+  FACE_TOP,
+  FACE_BOTTOM,
+  FACE_SIDE,
+  FACES_PER_BLOCK,
+} from './BlockTextureTable.js';
+
+export { type ShadowMapOptions, ShadowMapRenderer } from './ShadowMap.js';
